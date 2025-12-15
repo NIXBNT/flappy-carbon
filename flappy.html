@@ -44,13 +44,14 @@
             const ctx = canvas.getContext("2d");
 
             // --- Game constants ---
-            const GRAVITY = 1800;      // px/s^2
-            const FLAP_VY = -520;      // px/s
-            const PIPE_SPEED = 210;    // px/s
-            const PIPE_GAP = 170;      // px
-            const PIPE_WIDTH = 74;     // px
-            const PIPE_SPAWN_SEC = 1.25;
-            const BIRD_DRAW_SIZE = 88; // px, image height/width around this
+            const GRAVITY = 1800;       // px/s^2
+            const FLAP_VY = -520;       // px/s
+            const TARGET_SPEED = 210;   // px/s
+            const TARGET_SPAWN_SEC = 1.25;
+            const TARGET_WIDTH = 120;   // px
+            const TARGET_HEIGHT = 120;  // px
+            const TARGET_MARGIN = 16;   // px margin from top/bottom edges
+            const BIRD_DRAW_SIZE = 88;  // px, image height/width around this
 
             const birdNeutralImg = new Image();
             const birdRocketsImg = new Image();
@@ -61,14 +62,23 @@
             birdNeutralImg.addEventListener("load", () => { birdNeutralReady = true; });
             birdRocketsImg.addEventListener("load", () => { birdRocketsReady = true; });
 
+            const buyLowImg = new Image();
+            const sellHighImg = new Image();
+            let buyLowReady = false;
+            let sellHighReady = false;
+            buyLowImg.src = "buylow.png";
+            sellHighImg.src = "sellhigh.png";
+            buyLowImg.addEventListener("load", () => { buyLowReady = true; });
+            sellHighImg.addEventListener("load", () => { sellHighReady = true; });
+
             // --- State ---
-            let bird, pipes, score, best, started, gameOver, spawnTimer, lastTime;
+            let bird, targets, score, best, started, gameOver, spawnTimer, lastTime;
 
             const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
             function reset() {
                 bird = { x: 120, y: canvas.height * 0.45, r: 18, vy: 0 };
-                pipes = [];
+                targets = [];
                 score = 0;
                 best = Number(localStorage.getItem("mini_flappy_best") || 0);
                 started = false;
@@ -83,14 +93,16 @@
                 bird.vy = FLAP_VY;
             }
 
-            function spawnPipe() {
-                const margin = 90;
-                const topMax = canvas.height - margin - PIPE_GAP - 120;
-                const top = Math.floor(margin + Math.random() * (topMax - margin));
-                pipes.push({
-                    x: canvas.width + 40,
-                    top,
-                    passed: false
+            function spawnTarget() {
+                const type = Math.random() < 0.5 ? "buy" : "sell";
+                const y = type === "buy"
+                    ? canvas.height - 60 - TARGET_HEIGHT - TARGET_MARGIN
+                    : TARGET_MARGIN;
+                targets.push({
+                    x: canvas.width + TARGET_WIDTH,
+                    y,
+                    type,
+                    hit: false
                 });
             }
 
@@ -119,36 +131,24 @@
                 if (bird.y + bird.r >= canvas.height - 60) { bird.y = canvas.height - 60 - bird.r; die(); }
                 if (bird.y - bird.r <= 0) { bird.y = bird.r; bird.vy = 0; }
 
-                // Pipes
+                // Targets
                 spawnTimer += dt;
-                if (spawnTimer >= PIPE_SPAWN_SEC) {
+                if (spawnTimer >= TARGET_SPAWN_SEC) {
                     spawnTimer = 0;
-                    spawnPipe();
+                    spawnTarget();
                 }
 
-                for (const p of pipes) {
-                    p.x -= PIPE_SPEED * dt;
-
-                    // Score when bird passes
-                    if (!p.passed && p.x + PIPE_WIDTH < bird.x) {
-                        p.passed = true;
-                        score += 1;
-                    }
-
-                    // Collisions: top pipe rect, bottom pipe rect
-                    const topRect = { x: p.x, y: 0, w: PIPE_WIDTH, h: p.top };
-                    const botRect = { x: p.x, y: p.top + PIPE_GAP, w: PIPE_WIDTH, h: canvas.height - (p.top + PIPE_GAP) - 60 };
-
-                    if (
-                        circleRectCollide(bird.x, bird.y, bird.r, topRect.x, topRect.y, topRect.w, topRect.h) ||
-                        circleRectCollide(bird.x, bird.y, bird.r, botRect.x, botRect.y, botRect.w, botRect.h)
-                    ) {
-                        die();
+                for (const t of targets) {
+                    t.x -= TARGET_SPEED * dt;
+                    if (!t.hit) {
+                        if (circleRectCollide(bird.x, bird.y, bird.r, t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT)) {
+                            t.hit = true;
+                            score += 1;
+                        }
                     }
                 }
 
-                // Remove offscreen pipes
-                while (pipes.length && pipes[0].x + PIPE_WIDTH < -40) pipes.shift();
+                targets = targets.filter((t) => !t.hit && t.x + TARGET_WIDTH > -40);
             }
 
             function draw() {
@@ -167,26 +167,19 @@
                 }
                 ctx.globalAlpha = 1;
 
-                // Pipes
-                for (const p of pipes) {
-                    // Pipe body
-                    ctx.fillStyle = "#2ecc71";
-                    ctx.strokeStyle = "#1b7f45";
-                    ctx.lineWidth = 4;
-
-                    const topH = p.top;
-                    const botY = p.top + PIPE_GAP;
-                    const botH = canvas.height - botY - 60;
-
-                    // Top
-                    roundRect(ctx, p.x, 0, PIPE_WIDTH, topH, 10, true, true);
-                    // Bottom
-                    roundRect(ctx, p.x, botY, PIPE_WIDTH, botH, 10, true, true);
-
-                    // Lips
-                    ctx.fillStyle = "#34d979";
-                    roundRect(ctx, p.x - 6, topH - 18, PIPE_WIDTH + 12, 18, 10, true, false);
-                    roundRect(ctx, p.x - 6, botY, PIPE_WIDTH + 12, 18, 10, true, false);
+                // Targets
+                for (const t of targets) {
+                    const img = t.type === "buy" ? buyLowImg : sellHighImg;
+                    const ready = t.type === "buy" ? buyLowReady : sellHighReady;
+                    if (ready) {
+                        ctx.drawImage(img, t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT);
+                    } else {
+                        ctx.fillStyle = t.type === "buy" ? "#f5ce8a" : "#f49fb1";
+                        ctx.fillRect(t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT);
+                        ctx.strokeStyle = "#fff";
+                        ctx.lineWidth = 3;
+                        ctx.strokeRect(t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT);
+                    }
                 }
 
                 // Ground
@@ -275,20 +268,6 @@
                 const scale = Math.min(maxW / canvas.width, maxH / canvas.height);
                 canvas.style.width = Math.floor(canvas.width * scale) + "px";
                 canvas.style.height = Math.floor(canvas.height * scale) + "px";
-            }
-
-            // Rounded rect helper
-            function roundRect(ctx, x, y, w, h, r, fill, stroke) {
-                const radius = Math.min(r, w / 2, h / 2);
-                ctx.beginPath();
-                ctx.moveTo(x + radius, y);
-                ctx.arcTo(x + w, y, x + w, y + h, radius);
-                ctx.arcTo(x + w, y + h, x, y + h, radius);
-                ctx.arcTo(x, y + h, x, y, radius);
-                ctx.arcTo(x, y, x + w, y, radius);
-                ctx.closePath();
-                if (fill) ctx.fill();
-                if (stroke) ctx.stroke();
             }
 
             // Controls
