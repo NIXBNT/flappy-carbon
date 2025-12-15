@@ -10,13 +10,30 @@
         body {
             height: 100%;
             margin: 0;
-            background: #0b1220;
+            background-color: #0b1220;
+        }
+
+        body {
+            overflow: hidden;
+        }
+
+        .game-zone {
+            position: relative;
+            width: 420px;
+            height: 700px;
+            margin: 60px auto 30px;
+            border-radius: 18px;
+            overflow: hidden;
+            background: #020f1b;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.45);
         }
 
         canvas {
             display: block;
-            margin: 0 auto;
-            background: linear-gradient(#77c8ff, #dff6ff);
+            width: 100%;
+            height: 100%;
+            background: transparent;
         }
 
         .hint {
@@ -30,24 +47,31 @@
             padding: 8px 10px;
             border-radius: 10px;
             user-select: none;
+            z-index: 2;
         }
     </style>
 </head>
 
 <body>
     <div class="hint">Space / Click / Tap = flap • R = restart</div>
-    <canvas id="c" width="420" height="700"></canvas>
+    <div class="game-zone">
+        <canvas id="c" width="420" height="700"></canvas>
+    </div>
 
     <script>
         (() => {
             const canvas = document.getElementById("c");
             const ctx = canvas.getContext("2d");
+            const gameZone = document.querySelector(".game-zone");
 
             // --- Game constants ---
             const GRAVITY = 1800;       // px/s^2
             const FLAP_VY = -520;       // px/s
-            const TARGET_SPEED = 210;   // px/s
-            const TARGET_SPAWN_SEC = 1.25;
+            const SCROLL_SPEED = 260;   // px/s shared by chart + targets
+            const PRICE_POINT_SPACING = 42;
+            const PRICE_BUFFER = PRICE_POINT_SPACING * 6;
+            const PRICE_MIN_Y = 130;
+            const PRICE_MAX_Y = canvas.height - 190;
             const TARGET_WIDTH = 120;   // px
             const TARGET_HEIGHT = 120;  // px
             const TARGET_MARGIN = 16;   // px margin from top/bottom edges
@@ -71,8 +95,11 @@
             buyLowImg.addEventListener("load", () => { buyLowReady = true; });
             sellHighImg.addEventListener("load", () => { sellHighReady = true; });
 
+            const pricePoints = [];
+            let allowFeatures = false;
+
             // --- State ---
-            let bird, targets, score, best, started, gameOver, spawnTimer, lastTime;
+            let bird, targets, score, best, started, gameOver, lastTime;
 
             const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -83,27 +110,116 @@
                 best = Number(localStorage.getItem("mini_flappy_best") || 0);
                 started = false;
                 gameOver = false;
-                spawnTimer = 0;
+                allowFeatures = false;
+                initPriceSeries();
                 lastTime = performance.now();
             }
 
-            function flap() {
-                if (!started) started = true;
-                if (gameOver) return;
-                bird.vy = FLAP_VY;
+            function initPriceSeries() {
+                pricePoints.length = 0;
+                let x = -PRICE_POINT_SPACING * 2;
+                let prevY = (PRICE_MIN_Y + PRICE_MAX_Y) / 2;
+                while (x <= canvas.width + PRICE_BUFFER) {
+                    prevY = generatePrice(prevY);
+                    pricePoints.push({ x, y: prevY });
+                    x += PRICE_POINT_SPACING;
+                }
             }
 
-            function spawnTarget() {
-                const type = Math.random() < 0.5 ? "buy" : "sell";
-                const y = type === "buy"
-                    ? canvas.height - 60 - TARGET_HEIGHT - TARGET_MARGIN
-                    : TARGET_MARGIN;
+            function generatePrice(prevY) {
+                const drift = (Math.random() - 0.5) * 90;
+                return clamp(prevY + drift, PRICE_MIN_Y, PRICE_MAX_Y);
+            }
+
+            function advancePrice(dt) {
+                const delta = SCROLL_SPEED * dt;
+                for (const point of pricePoints) {
+                    point.x -= delta;
+                }
+
+                while (pricePoints.length && pricePoints[0].x < -PRICE_BUFFER) {
+                    pricePoints.shift();
+                }
+
+                let last = pricePoints[pricePoints.length - 1];
+                while (last && last.x < canvas.width + PRICE_BUFFER) {
+                    const nextY = generatePrice(last.y);
+                    const nextPoint = { x: last.x + PRICE_POINT_SPACING, y: nextY };
+                    pricePoints.push(nextPoint);
+                    if (allowFeatures) {
+                        checkFeature(pricePoints.length - 2);
+                    }
+                    last = nextPoint;
+                }
+            }
+
+            function checkFeature(midIndex) {
+                if (midIndex <= 0 || midIndex >= pricePoints.length - 1) return;
+                const prev = pricePoints[midIndex - 1];
+                const curr = pricePoints[midIndex];
+                const next = pricePoints[midIndex + 1];
+                if (!prev || !curr || !next) return;
+
+                if (curr.y < prev.y && curr.y < next.y) {
+                    spawnTargetFromFeature(curr, "buy");
+                } else if (curr.y > prev.y && curr.y > next.y) {
+                    spawnTargetFromFeature(curr, "sell");
+                }
+            }
+
+            function spawnTargetFromFeature(point, type) {
+                const last = targets[targets.length - 1];
+                if (last && point.x - last.x < TARGET_WIDTH * 1.15) return;
+                const y = clamp(point.y - TARGET_HEIGHT / 2, TARGET_MARGIN, canvas.height - TARGET_HEIGHT - TARGET_MARGIN);
                 targets.push({
-                    x: canvas.width + TARGET_WIDTH,
+                    x: point.x,
                     y,
                     type,
                     hit: false
                 });
+            }
+
+            function drawPriceChart() {
+                ctx.save();
+                ctx.lineJoin = "round";
+                ctx.lineCap = "round";
+                ctx.strokeStyle = "rgba(46, 223, 168, 0.85)";
+                ctx.lineWidth = 5;
+                ctx.beginPath();
+                let startedLine = false;
+                for (const point of pricePoints) {
+                    if (point.x < -PRICE_POINT_SPACING || point.x > canvas.width + PRICE_POINT_SPACING) continue;
+                    if (!startedLine) {
+                        ctx.moveTo(point.x, point.y);
+                        startedLine = true;
+                    } else {
+                        ctx.lineTo(point.x, point.y);
+                    }
+                }
+                ctx.stroke();
+
+                for (let i = 1; i < pricePoints.length; i++) {
+                    const left = pricePoints[i - 1];
+                    const right = pricePoints[i];
+                    if (right.x < -PRICE_POINT_SPACING || left.x > canvas.width + PRICE_POINT_SPACING) continue;
+                    const midX = (left.x + right.x) / 2;
+                    const color = right.y < left.y ? "rgba(57, 227, 167, 0.65)" : "rgba(244, 73, 125, 0.65)";
+                    const bodyHeight = Math.max(28, Math.abs(right.y - left.y) + 18);
+                    const top = Math.min(left.y, right.y) - bodyHeight / 2;
+                    const width = PRICE_POINT_SPACING * 0.4;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(midX - width / 2, top, width, bodyHeight);
+                }
+                ctx.restore();
+            }
+
+            function flap() {
+                if (!started) {
+                    started = true;
+                    allowFeatures = true;
+                }
+                if (gameOver) return;
+                bird.vy = FLAP_VY;
             }
 
             function circleRectCollide(cx, cy, cr, rx, ry, rw, rh) {
@@ -115,12 +231,14 @@
 
             function die() {
                 gameOver = true;
+                allowFeatures = false;
                 best = Math.max(best, score);
                 localStorage.setItem("mini_flappy_best", String(best));
             }
 
             function update(dt) {
                 // dt in seconds
+                advancePrice(dt);
                 if (!started || gameOver) return;
 
                 // Bird physics
@@ -131,15 +249,8 @@
                 if (bird.y + bird.r >= canvas.height - 60) { bird.y = canvas.height - 60 - bird.r; die(); }
                 if (bird.y - bird.r <= 0) { bird.y = bird.r; bird.vy = 0; }
 
-                // Targets
-                spawnTimer += dt;
-                if (spawnTimer >= TARGET_SPAWN_SEC) {
-                    spawnTimer = 0;
-                    spawnTarget();
-                }
-
                 for (const t of targets) {
-                    t.x -= TARGET_SPEED * dt;
+                    t.x -= SCROLL_SPEED * dt;
                     if (!t.hit) {
                         if (circleRectCollide(bird.x, bird.y, bird.r, t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT)) {
                             t.hit = true;
@@ -152,20 +263,11 @@
             }
 
             function draw() {
-                // Sky already via canvas background, but we can add clouds/lines subtly
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#041421";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-                // Parallax lines
-                ctx.globalAlpha = 0.12;
-                ctx.strokeStyle = "#0b1220";
-                ctx.lineWidth = 2;
-                for (let y = 90; y < canvas.height; y += 110) {
-                    ctx.beginPath();
-                    ctx.moveTo(0, y);
-                    ctx.lineTo(canvas.width, y);
-                    ctx.stroke();
-                }
-                ctx.globalAlpha = 1;
+                drawPriceChart();
 
                 // Targets
                 for (const t of targets) {
@@ -263,11 +365,13 @@
 
             function resizeToFit() {
                 // Keep aspect ratio; scale via CSS only
-                const maxW = Math.min(window.innerWidth, 520);
-                const maxH = Math.min(window.innerHeight, 820);
-                const scale = Math.min(maxW / canvas.width, maxH / canvas.height);
-                canvas.style.width = Math.floor(canvas.width * scale) + "px";
-                canvas.style.height = Math.floor(canvas.height * scale) + "px";
+                const maxW = Math.min(Math.max(window.innerWidth - 24, 260), 520);
+                const maxH = Math.min(Math.max(window.innerHeight - 120, 320), 820);
+                const scale = Math.min(1, Math.min(maxW / canvas.width, maxH / canvas.height));
+                const cssWidth = Math.floor(canvas.width * scale);
+                const cssHeight = Math.floor(canvas.height * scale);
+                gameZone.style.width = cssWidth + "px";
+                gameZone.style.height = cssHeight + "px";
             }
 
             // Controls
