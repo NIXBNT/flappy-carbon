@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Mini Flappy</title>
+    <title>ReplyGuy Flappy</title>
     <style>
         html,
         body {
@@ -76,6 +76,8 @@
             const TARGET_HEIGHT = 120;  // px
             const TARGET_MARGIN = 16;   // px margin from top/bottom edges
             const BIRD_DRAW_SIZE = 88;  // px, image height/width around this
+            const GAME_DURATION = 20;   // seconds a run is allowed
+            const SCROLL_SPEED_MULTIPLIER = 1.1; // multiplier for scroll speed
 
             const birdNeutralImg = new Image();
             const birdRocketsImg = new Image();
@@ -99,7 +101,7 @@
             let allowFeatures = false;
 
             // --- State ---
-            let bird, targets, score, best, started, gameOver, lastTime;
+            let bird, targets, score, best, started, gameOver, lastTime, scrollSpeed, speedTimer, startTime, timeExpired;
 
             const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -111,8 +113,12 @@
                 started = false;
                 gameOver = false;
                 allowFeatures = false;
+                scrollSpeed = SCROLL_SPEED;
+                speedTimer = 0;
                 initPriceSeries();
                 lastTime = performance.now();
+                startTime = null;
+                timeExpired = false;
             }
 
             function initPriceSeries() {
@@ -132,7 +138,7 @@
             }
 
             function advancePrice(dt) {
-                const delta = SCROLL_SPEED * dt;
+                const delta = scrollSpeed * dt;
                 for (const point of pricePoints) {
                     point.x -= delta;
                 }
@@ -217,6 +223,7 @@
                 if (!started) {
                     started = true;
                     allowFeatures = true;
+                    startTime = performance.now();
                 }
                 if (gameOver) return;
                 bird.vy = FLAP_VY;
@@ -229,15 +236,31 @@
                 return (dx * dx + dy * dy) <= cr * cr;
             }
 
-            function die() {
+            function die(reason = "crash") {
+                if (gameOver) return;
                 gameOver = true;
                 allowFeatures = false;
+                timeExpired = reason === "time";
                 best = Math.max(best, score);
                 localStorage.setItem("mini_flappy_best", String(best));
             }
 
             function update(dt) {
+                if (started && !gameOver && startTime !== null) {
+                    const elapsed = (performance.now() - startTime) / 1000;
+                    if (elapsed >= GAME_DURATION) {
+                        die("time");
+                    }
+                }
                 // dt in seconds
+                if (started && !gameOver) {
+                    speedTimer += dt;
+                    while (speedTimer >= 1) {
+                        scrollSpeed *= SCROLL_SPEED_MULTIPLIER;
+                        speedTimer -= 1;
+                    }
+                }
+
                 advancePrice(dt);
                 if (!started || gameOver) return;
 
@@ -250,7 +273,7 @@
                 if (bird.y - bird.r <= 0) { bird.y = bird.r; bird.vy = 0; }
 
                 for (const t of targets) {
-                    t.x -= SCROLL_SPEED * dt;
+                    t.x -= scrollSpeed * dt;
                     if (!t.hit) {
                         if (circleRectCollide(bird.x, bird.y, bird.r, t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT)) {
                             t.hit = true;
@@ -339,7 +362,8 @@
                 if (!started) {
                     banner("Click / Tap / Space to start");
                 } else if (gameOver) {
-                    banner("Game Over — Press R to restart");
+                    const text = timeExpired ? `Time's Up! Final Score: ${score}` : "Game Over — Press R to restart";
+                    banner(text);
                 }
             }
 
