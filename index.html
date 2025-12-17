@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#0b1220" />
+    <title>ReplyGuy Flappy — Telegram Mini App</title>
+    <style>
+        :root {
+            --bg: #0b1220;
+            --card: #020f1b;
+            --border: rgba(255, 255, 255, 0.05);
+            --text: rgba(255, 255, 255, 0.92);
+            --text-subtle: rgba(255, 255, 255, 0.58);
+            --shadow: 0 25px 60px rgba(0, 0, 0, 0.45);
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        }
+
+        body {
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: calc(env(safe-area-inset-top, 10px) + 6px) 12px calc(env(safe-area-inset-bottom, 18px) + 6px);
+            box-sizing: border-box;
+        }
+
+        .app-shell {
+            width: min(520px, 100%);
+        }
+
+        .game-zone {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 420 / 700;
+            border-radius: 18px;
+            overflow: hidden;
+            background: var(--card);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: transparent;
+        }
+
+        .hint {
+            position: fixed;
+            left: 50%;
+            top: calc(env(safe-area-inset-top, 0px) + 12px);
+            transform: translateX(-50%);
+            font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            color: var(--text);
+            background: rgba(0, 0, 0, 0.35);
+            padding: 8px 10px;
+            border-radius: 10px;
+            user-select: none;
+            z-index: 2;
+            backdrop-filter: blur(6px);
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 4px 6px;
+            color: var(--text-subtle);
+        }
+
+        .controls button {
+            border: none;
+            border-radius: 12px;
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #21a3ff, #2de2c1);
+            color: #020b12;
+            font-weight: 700;
+            cursor: pointer;
+            width: 128px;
+            box-shadow: 0 10px 30px rgba(33, 163, 255, 0.4);
+        }
+
+        .controls button:active {
+            transform: translateY(1px);
+        }
+    </style>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+
+<body>
+    <div class="hint">Tap / click / space to flap • R or Restart to reset</div>
+    <div class="app-shell">
+        <div class="game-zone">
+            <canvas id="c" width="420" height="700"></canvas>
+        </div>
+        <div class="controls">
+            <div aria-live="polite">Built for Telegram Mini Apps.</div>
+            <button id="restart-btn" type="button">Restart</button>
+        </div>
+    </div>
+
+    <script>
+        (() => {
+            const tg = window.Telegram?.WebApp;
+            const canvas = document.getElementById("c");
+            const ctx = canvas.getContext("2d");
+            const gameZone = document.querySelector(".game-zone");
+            const restartBtn = document.getElementById("restart-btn");
+
+            // --- Game constants ---
+            const GRAVITY = 1800;       // px/s^2
+            const FLAP_VY = -520;       // px/s
+            const SCROLL_SPEED = 260;   // px/s shared by chart + targets
+            const PRICE_POINT_SPACING = 42;
+            const PRICE_BUFFER = PRICE_POINT_SPACING * 6;
+            const PRICE_MIN_Y = 130;
+            const PRICE_MAX_Y = canvas.height - 190;
+            const TARGET_WIDTH = 120;   // px
+            const TARGET_HEIGHT = 120;  // px
+            const TARGET_MARGIN = 16;   // px margin from top/bottom edges
+            const BIRD_DRAW_SIZE = 88;  // px, image height/width around this
+            const GAME_DURATION = 20;   // seconds a run is allowed
+            const SCROLL_SPEED_MULTIPLIER = 1.1; // multiplier for scroll speed
+
+            const birdNeutralImg = new Image();
+            const birdRocketsImg = new Image();
+            let birdNeutralReady = false;
+            let birdRocketsReady = false;
+            birdNeutralImg.src = "replyguy_neutral.png";
+            birdRocketsImg.src = "replyguy_rockets.png";
+            birdNeutralImg.addEventListener("load", () => { birdNeutralReady = true; });
+            birdRocketsImg.addEventListener("load", () => { birdRocketsReady = true; });
+
+            const buyLowImg = new Image();
+            const sellHighImg = new Image();
+            let buyLowReady = false;
+            let sellHighReady = false;
+            buyLowImg.src = "buylow.png";
+            sellHighImg.src = "sellhigh.png";
+            buyLowImg.addEventListener("load", () => { buyLowReady = true; });
+            sellHighImg.addEventListener("load", () => { sellHighReady = true; });
+
+            const pricePoints = [];
+            let allowFeatures = false;
+
+            // --- State ---
+            let bird, targets, score, best, started, gameOver, lastTime, scrollSpeed, speedTimer, startTime, timeExpired;
+
+            const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+            function reset() {
+                bird = { x: 120, y: canvas.height * 0.45, r: 18, vy: 0 };
+                targets = [];
+                score = 0;
+                best = Number(localStorage.getItem("mini_flappy_best") || 0);
+                started = false;
+                gameOver = false;
+                allowFeatures = false;
+                scrollSpeed = SCROLL_SPEED;
+                speedTimer = 0;
+                initPriceSeries();
+                lastTime = performance.now();
+                startTime = null;
+                timeExpired = false;
+            }
+
+            function initPriceSeries() {
+                pricePoints.length = 0;
+                let x = -PRICE_POINT_SPACING * 2;
+                let prevY = (PRICE_MIN_Y + PRICE_MAX_Y) / 2;
+                while (x <= canvas.width + PRICE_BUFFER) {
+                    prevY = generatePrice(prevY);
+                    pricePoints.push({ x, y: prevY });
+                    x += PRICE_POINT_SPACING;
+                }
+            }
+
+            function generatePrice(prevY) {
+                const drift = (Math.random() - 0.5) * 90;
+                return clamp(prevY + drift, PRICE_MIN_Y, PRICE_MAX_Y);
+            }
+
+            function advancePrice(dt) {
+                const delta = scrollSpeed * dt;
+                for (const point of pricePoints) {
+                    point.x -= delta;
+                }
+
+                while (pricePoints.length && pricePoints[0].x < -PRICE_BUFFER) {
+                    pricePoints.shift();
+                }
+
+                let last = pricePoints[pricePoints.length - 1];
+                while (last && last.x < canvas.width + PRICE_BUFFER) {
+                    const nextY = generatePrice(last.y);
+                    const nextPoint = { x: last.x + PRICE_POINT_SPACING, y: nextY };
+                    pricePoints.push(nextPoint);
+                    if (allowFeatures) {
+                        checkFeature(pricePoints.length - 2);
+                    }
+                    last = nextPoint;
+                }
+            }
+
+            function checkFeature(midIndex) {
+                if (midIndex <= 0 || midIndex >= pricePoints.length - 1) return;
+                const prev = pricePoints[midIndex - 1];
+                const curr = pricePoints[midIndex];
+                const next = pricePoints[midIndex + 1];
+                if (!prev || !curr || !next) return;
+
+                if (curr.y < prev.y && curr.y < next.y) {
+                    spawnTargetFromFeature(curr, "buy");
+                } else if (curr.y > prev.y && curr.y > next.y) {
+                    spawnTargetFromFeature(curr, "sell");
+                }
+            }
+
+            function spawnTargetFromFeature(point, type) {
+                const last = targets[targets.length - 1];
+                if (last && point.x - last.x < TARGET_WIDTH * 1.15) return;
+                const y = clamp(point.y - TARGET_HEIGHT / 2, TARGET_MARGIN, canvas.height - TARGET_HEIGHT - TARGET_MARGIN);
+                targets.push({
+                    x: point.x,
+                    y,
+                    type,
+                    hit: false
+                });
+            }
+
+            function drawPriceChart() {
+                ctx.save();
+                ctx.lineJoin = "round";
+                ctx.lineCap = "round";
+                ctx.strokeStyle = "rgba(46, 223, 168, 0.85)";
+                ctx.lineWidth = 5;
+                ctx.beginPath();
+                let startedLine = false;
+                for (const point of pricePoints) {
+                    if (point.x < -PRICE_POINT_SPACING || point.x > canvas.width + PRICE_POINT_SPACING) continue;
+                    if (!startedLine) {
+                        ctx.moveTo(point.x, point.y);
+                        startedLine = true;
+                    } else {
+                        ctx.lineTo(point.x, point.y);
+                    }
+                }
+                ctx.stroke();
+
+                for (let i = 1; i < pricePoints.length; i++) {
+                    const left = pricePoints[i - 1];
+                    const right = pricePoints[i];
+                    if (right.x < -PRICE_POINT_SPACING || left.x > canvas.width + PRICE_POINT_SPACING) continue;
+                    const midX = (left.x + right.x) / 2;
+                    const color = right.y < left.y ? "rgba(57, 227, 167, 0.65)" : "rgba(244, 73, 125, 0.65)";
+                    const bodyHeight = Math.max(28, Math.abs(right.y - left.y) + 18);
+                    const top = Math.min(left.y, right.y) - bodyHeight / 2;
+                    const width = PRICE_POINT_SPACING * 0.4;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(midX - width / 2, top, width, bodyHeight);
+                }
+                ctx.restore();
+            }
+
+            function flap() {
+                if (!started) {
+                    started = true;
+                    allowFeatures = true;
+                    startTime = performance.now();
+                }
+                if (gameOver) return;
+                bird.vy = FLAP_VY;
+                tg?.HapticFeedback?.impactOccurred("light");
+            }
+
+            function circleRectCollide(cx, cy, cr, rx, ry, rw, rh) {
+                const nx = clamp(cx, rx, rx + rw);
+                const ny = clamp(cy, ry, ry + rh);
+                const dx = cx - nx, dy = cy - ny;
+                return (dx * dx + dy * dy) <= cr * cr;
+            }
+
+            function die(reason = "crash") {
+                if (gameOver) return;
+                gameOver = true;
+                allowFeatures = false;
+                timeExpired = reason === "time";
+                best = Math.max(best, score);
+                localStorage.setItem("mini_flappy_best", String(best));
+                tg?.HapticFeedback?.notificationOccurred(reason === "time" ? "warning" : "error");
+            }
+
+            function update(dt) {
+                if (started && !gameOver && startTime !== null) {
+                    const elapsed = (performance.now() - startTime) / 1000;
+                    if (elapsed >= GAME_DURATION) {
+                        die("time");
+                    }
+                }
+                // dt in seconds
+                if (started && !gameOver) {
+                    speedTimer += dt;
+                    while (speedTimer >= 1) {
+                        scrollSpeed *= SCROLL_SPEED_MULTIPLIER;
+                        speedTimer -= 1;
+                    }
+                }
+
+                advancePrice(dt);
+                if (!started || gameOver) return;
+
+                // Bird physics
+                bird.vy += GRAVITY * dt;
+                bird.y += bird.vy * dt;
+
+                // Floor / ceiling
+                if (bird.y + bird.r >= canvas.height - 60) { bird.y = canvas.height - 60 - bird.r; die(); }
+                if (bird.y - bird.r <= 0) { bird.y = bird.r; bird.vy = 0; }
+
+                for (const t of targets) {
+                    t.x -= scrollSpeed * dt;
+                    if (!t.hit) {
+                        if (circleRectCollide(bird.x, bird.y, bird.r, t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT)) {
+                            t.hit = true;
+                            score += 1;
+                            tg?.HapticFeedback?.impactOccurred("medium");
+                        }
+                    }
+                }
+
+                targets = targets.filter((t) => !t.hit && t.x + TARGET_WIDTH > -40);
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#041421";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                drawPriceChart();
+
+                // Targets
+                for (const t of targets) {
+                    const img = t.type === "buy" ? buyLowImg : sellHighImg;
+                    const ready = t.type === "buy" ? buyLowReady : sellHighReady;
+                    if (ready) {
+                        ctx.drawImage(img, t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT);
+                    } else {
+                        ctx.fillStyle = t.type === "buy" ? "#f5ce8a" : "#f49fb1";
+                        ctx.fillRect(t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT);
+                        ctx.strokeStyle = "#fff";
+                        ctx.lineWidth = 3;
+                        ctx.strokeRect(t.x, t.y, TARGET_WIDTH, TARGET_HEIGHT);
+                    }
+                }
+
+                // Ground
+                ctx.fillStyle = "#2b2a33";
+                ctx.fillRect(0, canvas.height - 60, canvas.width, 60);
+                ctx.fillStyle = "#3a3945";
+                for (let x = 0; x < canvas.width; x += 24) {
+                    ctx.fillRect(x, canvas.height - 60, 12, 8);
+                }
+
+                // Bird
+                ctx.save();
+                ctx.translate(bird.x, bird.y);
+                const ascending = bird.vy < 0;
+                const activeImage = ascending ? birdRocketsImg : birdNeutralImg;
+                const imageReady = ascending ? birdRocketsReady : birdNeutralReady;
+                if (imageReady) {
+                    ctx.drawImage(activeImage, -BIRD_DRAW_SIZE / 2, -BIRD_DRAW_SIZE / 2, BIRD_DRAW_SIZE, BIRD_DRAW_SIZE);
+                } else {
+                    // Fallback circle while image is loading
+                    ctx.fillStyle = "#ffd166";
+                    ctx.strokeStyle = "#a06b00";
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, bird.r, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = "#fff";
+                    ctx.beginPath();
+                    ctx.arc(6, -6, 6, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = "#111";
+                    ctx.beginPath();
+                    ctx.arc(8, -6, 2.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = "#ff7a59";
+                    ctx.beginPath();
+                    ctx.moveTo(bird.r - 2, 0);
+                    ctx.lineTo(bird.r + 14, 5);
+                    ctx.lineTo(bird.r + 14, -5);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+                ctx.restore();
+
+                // UI text
+                ctx.fillStyle = "rgba(0,0,0,0.35)";
+                ctx.fillRect(14, 14, 170, 62);
+                ctx.fillStyle = "white";
+                ctx.font = "bold 20px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+                ctx.fillText(`Score: ${score}`, 24, 42);
+                ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+                ctx.fillText(`Best: ${best}`, 24, 64);
+
+                if (!started) {
+                    banner("Click / Tap / Space to start");
+                } else if (gameOver) {
+                    const text = timeExpired ? `Time's Up! Final Score: ${score}` : "Game Over — Press R to restart";
+                    banner(text);
+                }
+            }
+
+            function banner(text) {
+                ctx.save();
+                ctx.fillStyle = "rgba(0,0,0,0.50)";
+                ctx.fillRect(0, canvas.height * 0.34, canvas.width, 90);
+                ctx.fillStyle = "#fff";
+                ctx.font = "bold 22px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText(text, canvas.width / 2, canvas.height * 0.34 + 55);
+                ctx.restore();
+            }
+
+            function loop(now) {
+                const dt = Math.min(0.033, (now - lastTime) / 1000);
+                lastTime = now;
+
+                update(dt);
+                draw();
+                requestAnimationFrame(loop);
+            }
+
+            function resizeToFit() {
+                const viewportW = tg?.viewportWidth || window.innerWidth;
+                const viewportH = tg?.viewportHeight || window.innerHeight;
+                const maxW = Math.min(Math.max(viewportW - 24, 260), 520);
+                const maxH = Math.min(Math.max(viewportH - 160, 320), 820);
+                const scale = Math.min(1, Math.min(maxW / canvas.width, maxH / canvas.height));
+                const cssWidth = Math.floor(canvas.width * scale);
+                const cssHeight = Math.floor(canvas.height * scale);
+                gameZone.style.width = cssWidth + "px";
+                gameZone.style.height = cssHeight + "px";
+            }
+
+            function applyTelegramTheme() {
+                const tp = tg?.themeParams || {};
+                const root = document.documentElement;
+                const set = (name, value) => root.style.setProperty(name, value);
+                set("--bg", tp.bg_color || "#0b1220");
+                set("--card", tp.secondary_bg_color || "#020f1b");
+                set("--border", tp.hint_color ? `${tp.hint_color}33` : "rgba(255,255,255,0.05)");
+                set("--text", tp.text_color || "rgba(255,255,255,0.92)");
+                set("--text-subtle", tp.hint_color || "rgba(255,255,255,0.58)");
+                const metaTheme = document.querySelector('meta[name="theme-color"]');
+                if (metaTheme) {
+                    metaTheme.setAttribute("content", tp.bg_color || "#0b1220");
+                }
+            }
+
+            function initTelegram() {
+                if (!tg) return;
+                tg.ready();
+                tg.expand();
+                applyTelegramTheme();
+                tg.onEvent("themeChanged", applyTelegramTheme);
+                tg.onEvent("viewportChanged", resizeToFit);
+            }
+
+            // Controls
+            window.addEventListener("keydown", (e) => {
+                if (e.code === "Space") { e.preventDefault(); flap(); }
+                if (e.key.toLowerCase() === "r") { reset(); }
+            });
+
+            canvas.addEventListener("mousedown", (e) => { e.preventDefault(); flap(); });
+            canvas.addEventListener("touchstart", (e) => { e.preventDefault(); flap(); }, { passive: false });
+            restartBtn.addEventListener("click", () => { reset(); tg?.HapticFeedback?.selectionChanged(); });
+
+            window.addEventListener("resize", resizeToFit);
+
+            initTelegram();
+            reset();
+            resizeToFit();
+            requestAnimationFrame(loop);
+        })();
+    </script>
+</body>
+
+</html>
