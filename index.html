@@ -114,6 +114,21 @@
     <script>
         (() => {
             const tg = window.Telegram?.WebApp;
+
+            (function showInitDataDebug() {
+                const hint = document.querySelector(".hint");
+                if (!tg) {
+                    hint.textContent = "Not running inside Telegram (window.Telegram.WebApp missing).";
+                    return;
+                }
+                const raw = tg.initData || "";
+                const unsafe = tg.initDataUnsafe || {};
+                hint.textContent = raw
+                    ? `Telegram initData OK • user=${unsafe?.user?.id ?? "?"}`
+                    : "Telegram WebApp loaded but initData is empty (opened outside Telegram / wrong launch path).";
+            })();
+
+
             const canvas = document.getElementById("c");
             const ctx = canvas.getContext("2d");
             const gameZone = document.querySelector(".game-zone");
